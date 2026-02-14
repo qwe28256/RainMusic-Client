@@ -3,6 +3,7 @@ package com.example.neumusic.utils
 import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
 import java.io.File
+import java.nio.charset.Charset
 import java.util.logging.Level
 import java.util.logging.Logger
 import java.util.regex.Pattern
@@ -23,69 +24,50 @@ object LyricsHelper {
         Logger.getLogger("org.jaudiotagger").level = Level.OFF
     }
 
-    // 1. 匹配时间戳: [mm:ss.xx] 或 [mm:ss:xx] 或 [mm:ss]
-    private val TIME_PATTERN = Pattern.compile("\\[(\\d{1,2}):(\\d{1,2})([.:](\\d{1,3}))?\\]")
+    /**
+     * 【终极正则】
+     * 1. \s* : 允许在任何符号周围出现空格
+     * 2. \d+ : 允许数字是 1位、2位或多位 (兼容 [3:5.0])
+     * 3. (?: ... )? : 毫秒部分是可选的
+     */
+    private val TIME_PATTERN = Pattern.compile("\\[\\s*(\\d+)\\s*:\\s*(\\d+)(?:\\s*[.:]\\s*(\\d+))?\\s*]")
 
-    // 2. 匹配元数据标签 (如 [ti:Title]) - 用于过滤
     private val TAG_PATTERN = Pattern.compile("\\[(ti|ar|al|by|offset):.*?\\]")
 
-    /**
-     * 获取歌词的入口方法
-     * 策略：内嵌歌词 (Metadata) > 同名文件 (.lrc)
-     */
     fun getLyrics(audioPath: String): List<LyricsLine> {
-        // 1. 尝试读取内嵌歌词
         var rawLyrics = getEmbeddedLyrics(audioPath)
 
-        // 2. 如果内嵌歌词为空，尝试读取同名 lrc 文件
         if (rawLyrics.isNullOrEmpty()) {
             rawLyrics = getLrcFileContent(audioPath)
         }
 
-        // 3. 如果还是没有，返回空列表 (UI层会显示 No Lyrics)
         if (rawLyrics.isNullOrEmpty()) {
             return emptyList()
         }
 
-        // 4. 解析歌词内容
         return parseLrc(rawLyrics)
     }
 
-    /**
-     * 使用 JAudioTagger 读取内嵌歌词
-     */
     private fun getEmbeddedLyrics(path: String): String? {
         return try {
             val file = File(path)
             if (!file.exists()) return null
-
-            // JAudioTagger 读取音频文件
             val audioFile = AudioFileIO.read(file)
             val tag = audioFile.tag ?: return null
-
-            // 尝试读取歌词字段 (兼容 ID3v2, Vorbis 等)
             val lyrics = tag.getFirst(FieldKey.LYRICS)
-
-            // 有些文件可能存的是 CUSTOM 标签，但通常 LYRICS 足够覆盖大多数情况
             if (lyrics.isNotBlank()) lyrics else null
         } catch (e: Exception) {
-            // 读取失败（可能是文件损坏或权限问题），静默失败，交给 fallback 处理
             e.printStackTrace()
             null
         }
     }
 
-    /**
-     * 读取同名 .lrc 文件
-     */
     private fun getLrcFileContent(path: String): String? {
         return try {
-            // 移除后缀 (如 .mp3) 并加上 .lrc
             val lrcPath = path.substringBeforeLast(".") + ".lrc"
             val lrcFile = File(lrcPath)
-
             if (lrcFile.exists() && lrcFile.canRead()) {
-                lrcFile.readText()
+                readTextWithAutoEncoding(lrcFile)
             } else {
                 null
             }
@@ -95,55 +77,82 @@ object LyricsHelper {
         }
     }
 
-    /**
-     * 统一解析逻辑 (正则 + 清洗)
-     */
+    private fun readTextWithAutoEncoding(file: File): String {
+        return try {
+            file.readText(Charsets.UTF_8)
+        } catch (e: Exception) {
+            try {
+                file.readText(Charset.forName("GBK"))
+            } catch (e2: Exception) {
+                ""
+            }
+        }
+    }
+
     private fun parseLrc(lrcContent: String): List<LyricsLine> {
         val result = ArrayList<LyricsLine>()
 
-        // 统一换行符
-        val lines = lrcContent.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        // 【第一步：全局清洗】
+        // 这里的关键是把 \u00A0 (NBSP) 和 \u3000 (全角空格) 统统变成标准空格
+        // 这样后续的正则 \s 就能识别它们了
+        val cleanContent = lrcContent
+            .replace('\u00A0', ' ')
+            .replace('\u3000', ' ')
+            .replace('\uFEFF', ' ') // 去除 BOM
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+
+        val lines = cleanContent.split("\n")
 
         for (line in lines) {
             val trimLine = line.trim()
-
             if (trimLine.isEmpty()) continue
-            if (TAG_PATTERN.matcher(trimLine).matches()) continue
 
-            // 提取时间戳
+            // 过滤元数据
+            if (TAG_PATTERN.matcher(trimLine).find()) continue
+
             val matcher = TIME_PATTERN.matcher(trimLine)
             val timeStamps = ArrayList<Long>()
 
             while (matcher.find()) {
-                val min = matcher.group(1)?.toLongOrNull() ?: 0
-                val sec = matcher.group(2)?.toLongOrNull() ?: 0
-                val msStr = matcher.group(4)
+                try {
+                    val min = matcher.group(1)?.toLong() ?: 0
+                    val sec = matcher.group(2)?.toLong() ?: 0
+                    val msStr = matcher.group(3)
 
-                val ms = when {
-                    msStr == null -> 0L
-                    msStr.length == 1 -> msStr.toLong() * 100
-                    msStr.length == 2 -> msStr.toLong() * 10
-                    else -> msStr.take(3).toLong()
+                    // 毫秒处理逻辑 (兼容您提供的 [03:12.0])
+                    val ms = when (msStr?.length) {
+                        null -> 0L
+                        1 -> msStr.toLong() * 100  // .0 -> 0ms, .5 -> 500ms
+                        2 -> msStr.toLong() * 10   // .50 -> 500ms
+                        else -> msStr.take(3).toLong() // 截取前3位
+                    }
+
+                    val time = (min * 60 * 1000) + (sec * 1000) + ms
+                    timeStamps.add(time)
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-
-                val time = (min * 60 * 1000) + (sec * 1000) + ms
-                timeStamps.add(time)
             }
 
-            // 如果没有时间戳，说明这行可能是纯文本歌词（有些内嵌歌词是不带时间轴的纯文本）
-            // 如果要支持纯文本滚动，逻辑会很复杂。这里为了保证同步体验，暂且只支持带时间戳的行。
-            // 如果您希望显示纯文本，需要另外一套 UI 逻辑。
             if (timeStamps.isEmpty()) continue
 
-            // 提取并清洗文本
+            // 移除所有时间标签，剩下的就是歌词文本
             var content = matcher.replaceAll("").trim()
 
-            // 移除 // 注释
+            // 去除注释
             if (content.contains("//")) {
                 content = content.substringBefore("//").trim()
             }
 
-            if (content.isEmpty()) continue
+            // 如果这一行是空的（比如只有时间戳的空行），是否保留？
+            // 您的样本中有空行，如果想让空行也占位（显示一段空白时间），就保留
+            // 这里为了界面美观，如果是空字符串，通常不添加，除非您希望显示间隔
+            if (content.isEmpty()) {
+                // 可选：如果是段落间奏，可以加一个空字符串进去
+                // result.add(LyricsLine(timeStamps[0], ""))
+                continue
+            }
 
             for (time in timeStamps) {
                 result.add(LyricsLine(time, content))

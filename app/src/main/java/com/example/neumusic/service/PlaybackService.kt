@@ -12,6 +12,8 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -27,6 +29,9 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private lateinit var player: ExoPlayer
     private lateinit var notificationManager: NotificationManager
+
+    // 【新增】用于限制通知更新频率的时间戳
+    private var lastNotificationUpdateTime = 0L
 
     companion object {
         const val NOTIFICATION_ID = 8888
@@ -56,14 +61,27 @@ class PlaybackService : MediaSessionService() {
                     stopSelf()
                 }
             }
-            // 收到指令后立即更新 UI，防止延迟
-            updateNotification()
+            // 用户主动操作，立即强制更新
+            forceUpdateNotification()
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        player = ExoPlayer.Builder(this).build()
+
+        // 1. 配置 AudioAttributes
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .build()
+
+        // 2. 初始化 Player
+        player = ExoPlayer.Builder(this)
+            .setAudioAttributes(audioAttributes, true)
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build()
+
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         val intent = Intent(this, MainActivity::class.java)
@@ -91,13 +109,16 @@ class PlaybackService : MediaSessionService() {
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                updateNotification()
+                // 播放状态改变非常重要，立即更新
+                forceUpdateNotification()
             }
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
-                updateNotification()
+                // 切歌也立即更新
+                forceUpdateNotification()
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
-                updateNotification()
+                // 其他状态改变（如缓冲、拖动进度）进行节流，防止卡顿
+                updateNotificationDebounced()
             }
         })
 
@@ -107,7 +128,6 @@ class PlaybackService : MediaSessionService() {
         startForeground(NOTIFICATION_ID, createNotification())
     }
 
-    // 禁用系统默认通知
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
     }
 
@@ -125,14 +145,27 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    private fun updateNotification() {
+    // 【新增】带节流的更新 (Debounce)
+    private fun updateNotificationDebounced() {
+        if (player.playbackState != Player.STATE_IDLE) {
+            val now = System.currentTimeMillis()
+            // 500ms 内只更新一次，大幅减少 NotificationService 压力
+            if (now - lastNotificationUpdateTime > 500) {
+                notificationManager.notify(NOTIFICATION_ID, createNotification())
+                lastNotificationUpdateTime = now
+            }
+        }
+    }
+
+    // 【新增】强制更新 (用于点击按钮、切歌等必须立即响应的场景)
+    private fun forceUpdateNotification() {
         if (player.playbackState != Player.STATE_IDLE) {
             notificationManager.notify(NOTIFICATION_ID, createNotification())
+            lastNotificationUpdateTime = System.currentTimeMillis()
         }
     }
 
     private fun createNotification(): Notification {
-        // 【核心修改】只加载 collapsed 布局
         val collapsedView = RemoteViews(packageName, R.layout.notification_collapsed)
 
         val metadata = player.currentMediaItem?.mediaMetadata
@@ -140,11 +173,9 @@ class PlaybackService : MediaSessionService() {
         val artist = metadata?.artist ?: "Unknown Artist"
         val coverUri = metadata?.artworkUri
 
-        // 1. 设置文本
         collapsedView.setTextViewText(R.id.notification_title, title)
         collapsedView.setTextViewText(R.id.notification_artist, artist)
 
-        // 2. 设置封面
         var bitmap = BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)
         if (coverUri != null && coverUri.scheme == "file") {
             try {
@@ -156,11 +187,9 @@ class PlaybackService : MediaSessionService() {
         }
         collapsedView.setImageViewBitmap(R.id.notification_cover, bitmap)
 
-        // 3. 设置按钮图标
         val playIcon = if (player.isPlaying) R.drawable.ic_music_pause else R.drawable.ic_music_play
         collapsedView.setImageViewResource(R.id.notification_btn_play, playIcon)
 
-        // 4. 绑定点击事件 (包括上一首、下一首、关闭)
         collapsedView.setOnClickPendingIntent(R.id.notification_btn_prev, getPendingIntent(ACTION_PREV))
         collapsedView.setOnClickPendingIntent(R.id.notification_btn_play, getPendingIntent(ACTION_PLAY_PAUSE))
         collapsedView.setOnClickPendingIntent(R.id.notification_btn_next, getPendingIntent(ACTION_NEXT))
@@ -174,13 +203,10 @@ class PlaybackService : MediaSessionService() {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setCustomContentView(collapsedView)
-            // 【核心修改】不设置 BigContentView，强制只显示小视图
-            //.setCustomBigContentView(expandedView)
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
 
-        // Android 12+ 装饰风格适配 (保留装饰框，内容显示为我们的 XML)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setStyle(NotificationCompat.DecoratedCustomViewStyle())
         }

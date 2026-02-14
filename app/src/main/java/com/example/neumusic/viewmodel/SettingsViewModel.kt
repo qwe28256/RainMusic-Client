@@ -14,39 +14,37 @@ import kotlinx.coroutines.launch
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val prefs = application.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+    // 【统一修改】使用和 PlayerViewModel 一致的文件名和键名
+    private val prefs = application.getSharedPreferences("music_settings", Context.MODE_PRIVATE)
+    private val PREF_KEY_URI = "scan_uri_str"
 
-    // 存储的是文件夹的 URI 字符串 (例如: content://...)
-    private val _scanUri = MutableStateFlow(prefs.getString("scan_uri", "") ?: "")
-    val scanUri = _scanUri.asStateFlow()
+    // 存储的是文件夹的 URI 字符串
+    private val _scanUri = MutableStateFlow(prefs.getString(PREF_KEY_URI, "") ?: "")
+    // (可选：如果 SettingsScreen 里用了 scanUri，保留它；如果只用了 scanPathDisplay，可以不暴露)
 
-    // 用于 UI 展示的路径名称 (例如: Music)
+    // 用于 UI 展示的路径名称
     private val _scanPathDisplay = MutableStateFlow("未设置")
     val scanPathDisplay = _scanPathDisplay.asStateFlow()
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning = _isScanning.asStateFlow()
 
-    // 新增：扫描日志/进度信息
-    private val _scanLog = MutableStateFlow("")
-    val scanLog = _scanLog.asStateFlow()
+    // 【修改】改为 List<String> 以存储多行日志
+    private val _scanLogs = MutableStateFlow<List<String>>(emptyList())
+    val scanLogs = _scanLogs.asStateFlow()
 
     init {
-        // 初始化时更新显示名称
         if (_scanUri.value.isNotEmpty()) {
             try {
                 updateDisplayPath(Uri.parse(_scanUri.value))
             } catch (e: Exception) {
-                _scanPathDisplay.value = "无效路径"
+                _scanPathDisplay.value = "路径失效"
             }
         }
     }
 
-    // 保存用户选择的文件夹 URI
     fun setFolderUri(uri: Uri) {
         val contentResolver = getApplication<Application>().contentResolver
-
-        // 关键步骤：请求持久化权限，否则重启后失效
         val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         try {
@@ -55,34 +53,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             e.printStackTrace()
         }
 
-        // 保存
         val uriString = uri.toString()
-        prefs.edit().putString("scan_uri", uriString).apply()
+        prefs.edit().putString(PREF_KEY_URI, uriString).apply()
         _scanUri.value = uriString
         updateDisplayPath(uri)
     }
 
     private fun updateDisplayPath(uri: Uri) {
         val docFile = DocumentFile.fromTreeUri(getApplication(), uri)
-        // 尝试显示人类可读的名字
-        _scanPathDisplay.value = docFile?.name ?: uri.lastPathSegment ?: "Unknown"
+        _scanPathDisplay.value = docFile?.name ?: uri.lastPathSegment ?: "已选择目录"
     }
 
     fun scanMusic(context: Context) {
-        if (_isScanning.value || _scanUri.value.isEmpty()) return
+        val uriStr = _scanUri.value
+        if (_isScanning.value || uriStr.isEmpty()) return
 
         viewModelScope.launch {
             _isScanning.value = true
-            _scanLog.value = "准备开始..."
+            _scanLogs.value = listOf("开始初始化...") // 清空并显示第一条
+
             val repo = AudioRepository(context)
 
             try {
-                // 【核心修改】：收集 Flow 实现实时日志
-                repo.scanUriAndSave(_scanUri.value).collect { status ->
-                    _scanLog.value = status // 实时更新 UI
+                repo.scanUriAndSave(uriStr).collect { message ->
+                    // 【修改】追加日志模式
+                    val currentList = _scanLogs.value.toMutableList()
+                    currentList.add(message)
+                    _scanLogs.value = currentList
                 }
             } catch (e: Exception) {
-                _scanLog.value = "扫描出错: ${e.localizedMessage}"
+                val currentList = _scanLogs.value.toMutableList()
+                currentList.add("扫描出错: ${e.localizedMessage}")
+                _scanLogs.value = currentList
                 e.printStackTrace()
             } finally {
                 _isScanning.value = false
@@ -91,6 +93,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun clearLog() {
-        _scanLog.value = ""
+        _scanLogs.value = emptyList()
     }
 }

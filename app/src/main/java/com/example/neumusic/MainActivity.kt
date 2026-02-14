@@ -29,6 +29,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.neumusic.service.PlaybackService
 import com.example.neumusic.ui.MainScreen
 import com.example.neumusic.viewmodel.PlayerViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -37,6 +38,7 @@ import com.google.accompanist.permissions.rememberMultiplePermissionsState
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 沉浸式状态栏设置
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
             MaterialTheme {
@@ -79,12 +81,13 @@ fun PermissionManager() {
     }
 }
 
-@OptIn(ExperimentalPermissionsApi::class) // 【修复】添加 OptIn 注解
+@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun MainContent() {
+    val context = LocalContext.current
     val viewModel: PlayerViewModel = viewModel()
 
-    // 即使有了文件权限，对于 Android 13+，我们还需要申请一下通知权限
+    // 1. Android 13+ 申请通知权限
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val notificationPermission = rememberMultiplePermissionsState(
             permissions = listOf(Manifest.permission.POST_NOTIFICATIONS)
@@ -94,7 +97,18 @@ fun MainContent() {
         }
     }
 
+    // 2. 关键修复：显式启动 PlaybackService
+    // 这样服务就会进入 "Started" 状态，而不仅仅是 "Bound" 状态
+    // "Bound" 状态的服务会在 Activity 销毁时一起死掉，"Started" 不会。
     LaunchedEffect(Unit) {
+        val intent = Intent(context, PlaybackService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+
+        // 3. 初始化 MediaController (绑定服务)
         viewModel.initializeController()
     }
 

@@ -6,29 +6,63 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.example.neumusic.data.AudioFile
 import com.example.neumusic.data.AudioRepository
+import com.example.neumusic.data.database.MusicDatabase
 import com.example.neumusic.service.PlaybackService
 import com.example.neumusic.utils.LyricsHelper
 import com.example.neumusic.utils.LyricsLine
-import com.example.neumusic.utils.SleepTimerManager // 导入
+import com.example.neumusic.utils.SleepTimerManager
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+enum class PlayMode {
+    LOOP_ALL, LOOP_ONE, SHUFFLE
+}
+
+@androidx.annotation.OptIn(UnstableApi::class)
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
     private var playerController: MediaController? = null
+    private val musicDao = MusicDatabase.getDatabase(application).musicDao()
 
-    // UI State
     private val _playlist = MutableStateFlow<List<AudioFile>>(emptyList())
     val playlist = _playlist.asStateFlow()
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery = _searchQuery.asStateFlow()
+
+    // 核心：在 IO 线程进行搜索过滤
+    val displaySongs: StateFlow<List<AudioFile>> = _playlist
+        .combine(_searchQuery) { songs, query ->
+            if (query.isEmpty()) {
+                songs
+            } else {
+                songs.filter {
+                    it.title.contains(query, ignoreCase = true) ||
+                            it.artist.contains(query, ignoreCase = true)
+                }
+            }
+        }
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
 
     private val _currentSong = MutableStateFlow<AudioFile?>(null)
     val currentSong = _currentSong.asStateFlow()
@@ -48,21 +82,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _duration = MutableStateFlow(0L)
     val duration = _duration.asStateFlow()
 
-    // === 修改：直接对接 SleepTimerManager ===
-    // 这里的 sleepTimerText 直接透传 Manager 的状态
+    private val _playMode = MutableStateFlow(PlayMode.LOOP_ALL)
+    val playMode = _playMode.asStateFlow()
+
     val sleepTimerText = SleepTimerManager.timeLeft
 
-    // 设置定时器 (UI 调用此方法)
     fun setSleepTimer(minutes: Int) {
         SleepTimerManager.startTimer(minutes)
     }
 
-    // 取消定时器
     fun cancelSleepTimer() {
         SleepTimerManager.stopTimer()
     }
-
-    // ... 以下所有代码保持不变 ...
 
     fun initializeController() {
         val context = getApplication<Application>()
@@ -74,6 +105,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 playerController = controllerFuture.get()
                 setupPlayerListener()
                 observeDatabase()
+                syncPlayModeState()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -87,27 +119,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             repository.allMusic.collect { files ->
                 _playlist.value = files
                 withContext(Dispatchers.Main) {
-                    if (playerController != null && files.isNotEmpty()) {
-                        if (playerController?.mediaItemCount == 0) {
-                            if (playerController?.mediaItemCount == 0) {
-                                val mediaItems = files.map { file ->
-                                    // 【核心修复】：构建完整的 MediaMetadata，供通知栏读取
-                                    val metadata = androidx.media3.common.MediaMetadata.Builder()
-                                        .setTitle(file.title)
-                                        .setArtist(file.artist)
-                                        // 传入封面 URI，通知栏适配器会读取这个 URI 来显示图片
-                                        .setArtworkUri(file.albumArtUri)
-                                        .build()
-
-                                    MediaItem.Builder()
-                                        .setUri(file.uri)
-                                        .setMediaId(file.id.toString())
-                                        .setMediaMetadata(metadata)
-                                        .build()
-                                }
-                                playerController?.setMediaItems(mediaItems)
-                                playerController?.prepare()
-                            }
+                    if (playerController != null) {
+                        if (files.isNotEmpty() && (playerController?.mediaItemCount == 0 || playerController?.mediaItemCount != files.size)) {
+                            updatePlayerMediaItems(files)
+                        } else if (files.isEmpty()) {
+                            playerController?.clearMediaItems()
                         } else {
                             syncPlayerState()
                         }
@@ -115,6 +131,35 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    private fun updatePlayerMediaItems(files: List<AudioFile>) {
+        val mediaItems = files.map { file ->
+            val metadata = androidx.media3.common.MediaMetadata.Builder()
+                .setTitle(file.title)
+                .setArtist(file.artist)
+                .setArtworkUri(file.albumArtUri)
+                .build()
+
+            MediaItem.Builder()
+                .setUri(file.uri)
+                .setMediaId(file.id.toString())
+                .setMediaMetadata(metadata)
+                .build()
+        }
+
+        val currentIdx = playerController?.currentMediaItemIndex ?: 0
+        val currentPos = playerController?.currentPosition ?: 0L
+        val wasPlaying = playerController?.isPlaying == true
+
+        playerController?.setMediaItems(mediaItems)
+
+        if (currentIdx < mediaItems.size) {
+            playerController?.seekTo(currentIdx, currentPos)
+        }
+
+        playerController?.prepare()
+        if (wasPlaying) playerController?.play()
     }
 
     private fun syncPlayerState() {
@@ -135,6 +180,19 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 _progress.value = controller.currentPosition
                 updateLyricIndex(controller.currentPosition)
             }
+            syncPlayModeState()
+        }
+    }
+
+    private fun syncPlayModeState() {
+        playerController?.let {
+            if (it.shuffleModeEnabled) {
+                _playMode.value = PlayMode.SHUFFLE
+            } else if (it.repeatMode == Player.REPEAT_MODE_ONE) {
+                _playMode.value = PlayMode.LOOP_ONE
+            } else {
+                _playMode.value = PlayMode.LOOP_ALL
+            }
         }
     }
 
@@ -152,7 +210,35 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     updateCurrentSongInfo()
                 }
             }
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                syncPlayModeState()
+            }
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                syncPlayModeState()
+            }
         })
+    }
+
+    fun togglePlayMode() {
+        playerController?.let { controller ->
+            when (_playMode.value) {
+                PlayMode.LOOP_ALL -> {
+                    controller.shuffleModeEnabled = false
+                    controller.repeatMode = Player.REPEAT_MODE_ONE
+                    _playMode.value = PlayMode.LOOP_ONE
+                }
+                PlayMode.LOOP_ONE -> {
+                    controller.repeatMode = Player.REPEAT_MODE_ALL
+                    controller.shuffleModeEnabled = true
+                    _playMode.value = PlayMode.SHUFFLE
+                }
+                PlayMode.SHUFFLE -> {
+                    controller.shuffleModeEnabled = false
+                    controller.repeatMode = Player.REPEAT_MODE_ALL
+                    _playMode.value = PlayMode.LOOP_ALL
+                }
+            }
+        }
     }
 
     private fun updateCurrentSongInfo() {
@@ -209,10 +295,58 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         updateLyricIndex(positionMs)
     }
 
+    fun playFromPlaylist(index: Int) {
+        playerController?.seekTo(index, 0)
+        playerController?.play()
+    }
+
+    fun playAudioFile(song: AudioFile) {
+        val index = _playlist.value.indexOfFirst { it.id == song.id }
+        if (index != -1) {
+            playFromPlaylist(index)
+        }
+    }
+
+    fun removeFromPlaylist(audioFile: AudioFile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            musicDao.deleteMusicById(audioFile.id)
+        }
+    }
+
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun deleteAudioFile(audioFile: AudioFile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // 1. 删除音频文件
+                val file = java.io.File(audioFile.path)
+                if (file.exists()) {
+                    file.delete()
+                }
+
+                // 2. 【新增】删除封面图片
+                // 注意：AudioFile 中我们把 string 路径转成了 Uri，这里需要转回去或者判断
+                // AudioFile.albumArtUri 是 file://...
+                audioFile.albumArtUri?.path?.let { coverPath ->
+                    val coverFile = java.io.File(coverPath)
+                    if (coverFile.exists()) {
+                        coverFile.delete()
+                    }
+                }
+
+                // 3. 删除数据库记录
+                musicDao.deleteMusicById(audioFile.id)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+
     override fun onCleared() {
         playerController?.release()
-        // 这里不要 cancelSleepTimer()，否则退出界面定时器就挂了
-        // 让 SleepTimerManager 自己管理生命周期
         super.onCleared()
     }
 }

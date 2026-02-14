@@ -1,5 +1,6 @@
 package com.example.neumusic.ui
 
+import android.widget.Toast
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -17,9 +18,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.*
@@ -28,9 +33,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -40,9 +46,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.example.neumusic.R
 import com.example.neumusic.data.AudioFile
+import com.example.neumusic.ui.components.LrcView
 import com.example.neumusic.ui.theme.neumorphicShadow
 import com.example.neumusic.utils.LyricsLine
+import com.example.neumusic.viewmodel.PlayMode
 import com.example.neumusic.viewmodel.PlayerViewModel
 import kotlinx.coroutines.launch
 
@@ -59,14 +68,19 @@ fun MusicPlayerScreen(
     viewModel: PlayerViewModel,
     onCollapse: () -> Unit
 ) {
-    // 性能优化：只在这里 collect 那些不会频繁变化的 State
-    // progress 等高频 State 下沉到子组件
+    val scope = rememberCoroutineScope()
     val pagerState = rememberPagerState(pageCount = { 2 })
 
-    // 定时器状态
+    // 状态控制
     var showTimerSheet by remember { mutableStateOf(false) }
+    var showPlaylistSheet by remember { mutableStateOf(false) }
     var showCustomTimeDialog by remember { mutableStateOf(false) }
-    val sheetState = rememberModalBottomSheetState()
+
+    // 【新增】状态上提：拖动进度
+    var draggingProgress by remember { mutableStateOf<Float?>(null) }
+
+    val timerSheetState = rememberModalBottomSheetState()
+    val playlistSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     Box(
         modifier = Modifier
@@ -74,43 +88,54 @@ fun MusicPlayerScreen(
             .background(NeuBackground)
             .statusBarsPadding()
             .padding(24.dp)
-        // 移除 graphicsLayer 以节省内存，除非有复杂动画需求
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxSize()
         ) {
-            // 1. Top Bar (歌曲标题在此)
+            // 1. Top Bar
             PlayerTopBar(viewModel, pagerState, onCollapse)
 
             // 2. Pager (封面/歌词)
-            // 开启 beyondBoundsPageCount 预加载，确保滑动不卡顿
             PlayerContentPager(
                 viewModel = viewModel,
                 pagerState = pagerState,
+                draggingProgress = draggingProgress, // 传入拖动进度实现歌词预览
                 modifier = Modifier.weight(1f).fillMaxWidth()
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 3. Indicator + Timer Icon
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                // 左侧悬浮：定时器图标
+            // 3. 中间功能区
+            Box(modifier = Modifier.fillMaxWidth().height(50.dp)) {
                 Box(modifier = Modifier.align(Alignment.CenterStart)) {
                     SleepTimerIcon(viewModel) { showTimerSheet = true }
                 }
-
-                // 中间：页面指示器
-                PageIndicator(pagerState)
+                Box(modifier = Modifier.align(Alignment.Center)) {
+                    PageIndicator(pagerState)
+                }
+                Row(
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PlayModeIcon(viewModel)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    PlaylistIcon { showPlaylistSheet = true }
+                }
             }
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // 4. Progress (高频刷新区，独立组件)
-            PlayerProgressSection(viewModel)
+            // 4. Progress (状态上提)
+            PlayerProgressSection(
+                viewModel = viewModel,
+                draggingProgress = draggingProgress,
+                onDraggingChange = { draggingProgress = it },
+                onDragFinished = {
+                    draggingProgress?.let { viewModel.seekTo(it.toLong()) }
+                    draggingProgress = null
+                }
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -121,43 +146,212 @@ fun MusicPlayerScreen(
         }
     }
 
-    // === Bottom Sheet ===
+    // Sheets
     if (showTimerSheet) {
         ModalBottomSheet(
             onDismissRequest = { showTimerSheet = false },
-            sheetState = sheetState,
+            sheetState = timerSheetState,
             containerColor = NeuBackground
         ) {
             SleepTimerSheetContent(
-                onTimeSelected = { min ->
-                    viewModel.setSleepTimer(min)
-                    showTimerSheet = false
-                },
-                onCustomClick = {
-                    showTimerSheet = false
-                    showCustomTimeDialog = true
-                },
-                onCancel = {
-                    viewModel.cancelSleepTimer()
-                    showTimerSheet = false
-                }
+                onTimeSelected = { min -> viewModel.setSleepTimer(min); showTimerSheet = false },
+                onCustomClick = { showTimerSheet = false; showCustomTimeDialog = true },
+                onCancel = { viewModel.cancelSleepTimer(); showTimerSheet = false }
             )
         }
     }
 
-    // === Custom Time Dialog ===
+    if (showPlaylistSheet) {
+        val configuration = LocalConfiguration.current
+        val screenHeight = configuration.screenHeightDp.dp
+        val sheetHeight = screenHeight * 0.6f
+
+        ModalBottomSheet(
+            onDismissRequest = { showPlaylistSheet = false },
+            sheetState = playlistSheetState,
+            containerColor = NeuBackground,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            modifier = Modifier.statusBarsPadding(),
+            dragHandle = { BottomSheetDefaults.DragHandle() }
+        ) {
+            Box(modifier = Modifier.height(sheetHeight)) {
+                PlaylistBottomSheetContent(
+                    viewModel = viewModel,
+                    onClose = {
+                        scope.launch { playlistSheetState.hide() }.invokeOnCompletion {
+                            if (!playlistSheetState.isVisible) showPlaylistSheet = false
+                        }
+                    }
+                )
+            }
+        }
+    }
+
     if (showCustomTimeDialog) {
         CustomTimeDialog(
-            onConfirm = { min ->
-                viewModel.setSleepTimer(min)
-                showCustomTimeDialog = false
-            },
+            onConfirm = { min -> viewModel.setSleepTimer(min); showCustomTimeDialog = false },
             onDismiss = { showCustomTimeDialog = false }
         )
     }
 }
 
-// === 组件：定时器图标 ===
+// === 修改：PlayerContentPager (接收拖动进度) ===
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun PlayerContentPager(
+    viewModel: PlayerViewModel,
+    pagerState: PagerState,
+    draggingProgress: Float?,
+    modifier: Modifier
+) {
+    val currentSong by viewModel.currentSong.collectAsState()
+    val lyrics by viewModel.lyrics.collectAsState()
+    val realProgress by viewModel.progress.collectAsState()
+
+    // 1. 判断是否正在拖动 (draggingProgress 不为 null 说明正在拖动)
+    val isSeeking = draggingProgress != null
+
+    // 2. 决定传给歌词控件的时间：如果是拖动中，就用拖动的值；否则用播放器真实进度
+    val effectiveProgress = draggingProgress?.toLong() ?: realProgress
+
+    HorizontalPager(
+        state = pagerState,
+        modifier = modifier
+    ) { page ->
+        if (page == 0) {
+            PlayerMainContent(currentSong)
+        } else {
+            // 3. 传入所有参数
+            LrcView(
+                lyrics = lyrics,
+                currentTime = effectiveProgress,
+                isSeeking = isSeeking, // 【修复点】传入这个缺失的参数
+                onSeekTo = { time -> viewModel.seekTo(time) }
+            )
+        }
+    }
+}
+
+
+// === 修改：PlayerProgressSection (状态上提) ===
+@Composable
+fun PlayerProgressSection(
+    viewModel: PlayerViewModel,
+    draggingProgress: Float?,
+    onDraggingChange: (Float?) -> Unit,
+    onDragFinished: () -> Unit
+) {
+    val realProgress by viewModel.progress.collectAsState()
+    val duration by viewModel.duration.collectAsState()
+
+    val currentPos = draggingProgress ?: realProgress.toFloat()
+    val totalDuration = if (duration > 0) duration.toFloat() else 1f
+
+    fun formatTime(ms: Long) = String.format("%02d:%02d", ms / 1000 / 60, (ms / 1000) % 60)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Slider(
+            value = currentPos,
+            onValueChange = onDraggingChange, // 拖动时只更新状态，不 Seek
+            onValueChangeFinished = onDragFinished, // 松手时 Seek
+            valueRange = 0f..totalDuration,
+            colors = SliderDefaults.colors(
+                thumbColor = AccentColor,
+                activeTrackColor = AccentColor,
+                inactiveTrackColor = Color.Gray.copy(0.2f)
+            ),
+            modifier = Modifier.height(20.dp)
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(formatTime(currentPos.toLong()), color = TextPrimary, fontSize = 12.sp)
+            Text(formatTime(duration), color = TextPrimary, fontSize = 12.sp)
+        }
+    }
+}
+
+// === 其他组件 ===
+
+@Composable
+fun PlayModeIcon(viewModel: PlayerViewModel) {
+    val mode by viewModel.playMode.collectAsState()
+    val context = LocalContext.current
+
+    val icon = when (mode) {
+        PlayMode.LOOP_ALL -> Icons.Default.Repeat
+        PlayMode.LOOP_ONE -> Icons.Default.RepeatOne
+        PlayMode.SHUFFLE -> Icons.Default.Shuffle
+    }
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(36.dp)
+            .neumorphicShadow(NeuLightShadow, NeuDarkShadow, 4.dp, 18.dp)
+            .background(NeuBackground, CircleShape)
+            .clip(CircleShape)
+            .clickable {
+                viewModel.togglePlayMode()
+                val nextText = when(mode) {
+                    PlayMode.LOOP_ALL -> "单曲循环"
+                    PlayMode.LOOP_ONE -> "随机播放"
+                    PlayMode.SHUFFLE -> "列表循环"
+                }
+                Toast.makeText(context, nextText, Toast.LENGTH_SHORT).show()
+            }
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = "Play Mode",
+            tint = if (mode == PlayMode.SHUFFLE) AccentColor else TextPrimary,
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun PageIndicator(pagerState: PagerState) {
+    Row(
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(pagerState.pageCount) { iteration ->
+            val isSelected = pagerState.currentPage == iteration
+            val width by animateDpAsState(targetValue = if (isSelected) 16.dp else 6.dp, label = "dot")
+            val color = if (isSelected) AccentColor else Color.Gray.copy(alpha = 0.4f)
+
+            Box(
+                modifier = Modifier
+                    .padding(3.dp)
+                    .height(6.dp)
+                    .width(width)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+        }
+    }
+}
+
+@Composable
+fun PlaylistIcon(onClick: () -> Unit) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(36.dp)
+            .neumorphicShadow(NeuLightShadow, NeuDarkShadow, 4.dp, 18.dp)
+            .background(NeuBackground, CircleShape)
+            .clip(CircleShape)
+            .clickable { onClick() }
+    ) {
+        Icon(
+            imageVector = Icons.Default.List,
+            contentDescription = "Playlist",
+            tint = TextPrimary,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
 @Composable
 fun SleepTimerIcon(viewModel: PlayerViewModel, onClick: () -> Unit) {
     val timerText by viewModel.sleepTimerText.collectAsState()
@@ -173,26 +367,13 @@ fun SleepTimerIcon(viewModel: PlayerViewModel, onClick: () -> Unit) {
             .clickable { onClick() }
     ) {
         if (isActive) {
-            // 倒计时激活：显示时间
-            Text(
-                text = timerText!!,
-                fontSize = 10.sp,
-                color = AccentColor,
-                fontWeight = FontWeight.Bold
-            )
+            Text(text = timerText!!, fontSize = 10.sp, color = AccentColor, fontWeight = FontWeight.Bold)
         } else {
-            // 未激活：显示时钟图标
-            Icon(
-                imageVector = Icons.Default.Schedule,
-                contentDescription = "Timer",
-                tint = Color.Gray,
-                modifier = Modifier.size(18.dp)
-            )
+            Icon(imageVector = Icons.Default.Schedule, contentDescription = "Timer", tint = Color.Gray, modifier = Modifier.size(18.dp))
         }
     }
 }
 
-// === 组件：定时器选择面板 ===
 @Composable
 fun SleepTimerSheetContent(
     onTimeSelected: (Int) -> Unit,
@@ -231,7 +412,6 @@ fun SleepTimerSheetContent(
     }
 }
 
-// === 组件：自定义时间弹窗 ===
 @Composable
 fun CustomTimeDialog(onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf("") }
@@ -268,7 +448,6 @@ fun CustomTimeDialog(onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
     )
 }
 
-// === 组件：顶部栏 ===
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlayerTopBar(viewModel: PlayerViewModel, pagerState: PagerState, onCollapse: () -> Unit) {
@@ -309,31 +488,6 @@ fun PlayerTopBar(viewModel: PlayerViewModel, pagerState: PagerState, onCollapse:
     }
 }
 
-// === 组件：Pager ===
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun PlayerContentPager(viewModel: PlayerViewModel, pagerState: PagerState, modifier: Modifier) {
-    val currentSong by viewModel.currentSong.collectAsState()
-    val lyrics by viewModel.lyrics.collectAsState()
-    val currentLyricIndex by viewModel.currentLyricIndex.collectAsState()
-
-    HorizontalPager(
-        state = pagerState,
-        beyondBoundsPageCount = 1, // 保持预加载
-        modifier = modifier
-    ) { page ->
-        if (page == 0) {
-            PlayerMainContent(currentSong)
-        } else {
-            LyricsView(
-                lyrics = lyrics,
-                currentIndex = currentLyricIndex,
-                onSeekToLine = { time -> viewModel.seekTo(time) }
-            )
-        }
-    }
-}
-
 @Composable
 fun PlayerMainContent(currentSong: AudioFile?) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -355,7 +509,7 @@ fun NeuAlbumCover(song: AudioFile?) {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
                     .data(song.albumArtUri)
-                    .crossfade(false) // 保持关闭 crossfade 以优化性能
+                    .crossfade(false)
                     .build(),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
@@ -368,90 +522,6 @@ fun NeuAlbumCover(song: AudioFile?) {
             ) {
                 Icon(Icons.Default.PlayArrow, null, tint = Color.Gray.copy(0.5f), modifier = Modifier.size(50.dp))
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun PageIndicator(pagerState: PagerState) {
-    Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-        repeat(pagerState.pageCount) { iteration ->
-            val isSelected = pagerState.currentPage == iteration
-            val width by animateDpAsState(targetValue = if (isSelected) 24.dp else 8.dp, label = "dot")
-            val color = if (isSelected) AccentColor else Color.Gray.copy(alpha = 0.4f)
-            Box(modifier = Modifier.padding(4.dp).height(8.dp).width(width).clip(CircleShape).background(color))
-        }
-    }
-}
-
-@Composable
-fun LyricsView(lyrics: List<LyricsLine>, currentIndex: Int, onSeekToLine: (Long) -> Unit) {
-    val listState = rememberLazyListState()
-
-    LaunchedEffect(currentIndex) {
-        if (currentIndex >= 0 && lyrics.isNotEmpty()) {
-            listState.animateScrollToItem(index = currentIndex, scrollOffset = -300)
-        }
-    }
-
-    if (lyrics.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("No Lyrics", color = Color.Gray, fontSize = 14.sp)
-        }
-    } else {
-        LazyColumn(
-            state = listState,
-            contentPadding = PaddingValues(vertical = 150.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            itemsIndexed(
-                items = lyrics,
-                // 保持 Key 唯一性修复
-                key = { i, item -> "${item.startTime}_$i" },
-                // 保持 contentType 优化
-                contentType = { _, _ -> "lyric" }
-            ) { index, line ->
-                val isCurrent = index == currentIndex
-                val color = if (isCurrent) AccentColor else Color.Gray.copy(0.5f)
-                val size = if (isCurrent) 24.sp else 16.sp
-                val weight = if (isCurrent) FontWeight.Bold else FontWeight.Medium
-
-                Text(
-                    text = line.text,
-                    color = color,
-                    fontSize = size,
-                    fontWeight = weight,
-                    textAlign = TextAlign.Center,
-                    lineHeight = 32.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp, horizontal = 20.dp)
-                        .clickable { onSeekToLine(line.startTime) }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun PlayerProgressSection(viewModel: PlayerViewModel) {
-    val progress by viewModel.progress.collectAsState()
-    val duration by viewModel.duration.collectAsState()
-
-    fun formatTime(ms: Long) = String.format("%02d:%02d", ms / 1000 / 60, (ms / 1000) % 60)
-
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Slider(
-            value = if (duration > 0) progress.toFloat() else 0f,
-            onValueChange = { viewModel.seekTo(it.toLong()) },
-            valueRange = 0f..(if (duration > 0) duration.toFloat() else 1f),
-            colors = SliderDefaults.colors(thumbColor = AccentColor, activeTrackColor = AccentColor, inactiveTrackColor = Color.Gray.copy(0.2f)),
-            modifier = Modifier.height(20.dp)
-        )
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatTime(progress), color = TextPrimary, fontSize = 12.sp)
-            Text(formatTime(duration), color = TextPrimary, fontSize = 12.sp)
         }
     }
 }
@@ -473,4 +543,87 @@ fun NeuButton(size: Dp, onClick: () -> Unit, content: @Composable () -> Unit) {
         contentAlignment = Alignment.Center,
         modifier = Modifier.size(size).neumorphicShadow(NeuLightShadow, NeuDarkShadow, 8.dp, size / 2).background(NeuBackground, CircleShape).clip(CircleShape).clickable { onClick() }
     ) { content() }
+}
+
+@Composable
+fun PlaylistBottomSheetContent(
+    viewModel: PlayerViewModel,
+    onClose: () -> Unit
+) {
+    val playlist by viewModel.playlist.collectAsState()
+    val currentSong by viewModel.currentSong.collectAsState()
+    val playMode by viewModel.playMode.collectAsState()
+
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(currentSong) {
+        val index = playlist.indexOfFirst { it.id == currentSong?.id }
+        if (index != -1) {
+            listState.scrollToItem(index)
+        }
+    }
+
+    val modeText = when(playMode) {
+        PlayMode.LOOP_ALL -> "列表循环"
+        PlayMode.LOOP_ONE -> "单曲循环"
+        PlayMode.SHUFFLE -> "随机播放"
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = "当前播放 (${playlist.size})",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = modeText,
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+            }
+        }
+
+        Divider(color = Color.Gray.copy(0.1f))
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f)
+        ) {
+            itemsIndexed(items = playlist, key = { _, item -> item.id }) { index, song ->
+                val isPlaying = song.id == currentSong?.id
+                val textColor = if (isPlaying) AccentColor else TextPrimary
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(50.dp).clickable { viewModel.playFromPlaylist(index) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isPlaying) {
+                        Icon(Icons.Default.PlayArrow, "Playing", tint = AccentColor, modifier = Modifier.size(16.dp).padding(end = 8.dp))
+                    } else {
+                        Spacer(modifier = Modifier.width(24.dp))
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(song.title, color = textColor, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(" - ${song.artist}", color = if (isPlaying) AccentColor.copy(0.7f) else Color.Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+
+                    IconButton(onClick = { viewModel.removeFromPlaylist(song) }) {
+                        Icon(painter = painterResource(id = R.drawable.ic_music_close), contentDescription = "Remove", tint = Color.Gray.copy(0.5f), modifier = Modifier.size(16.dp))
+                    }
+                }
+                Divider(color = Color.Gray.copy(0.05f))
+            }
+        }
+    }
 }

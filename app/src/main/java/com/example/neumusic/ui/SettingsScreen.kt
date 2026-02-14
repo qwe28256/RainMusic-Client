@@ -7,6 +7,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -35,12 +38,12 @@ fun SettingsScreen(
     val context = LocalContext.current
     val scanPathDisplay by viewModel.scanPathDisplay.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
-    val scanLog by viewModel.scanLog.collectAsState()
+    // 【修改】获取日志列表
+    val scanLogs by viewModel.scanLogs.collectAsState()
 
-    // 控制弹窗显示：正在扫描 OR (扫描结束且有日志)
-    val showDialog = isScanning || (scanLog.isNotEmpty() && scanLog.contains("扫描完成"))
+    // 控制弹窗显示：正在扫描 OR 日志不为空
+    val showDialog = isScanning || scanLogs.isNotEmpty()
 
-    // 文件夹选择器 Launcher
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
@@ -81,7 +84,6 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 左侧：目录选择框
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -113,8 +115,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.width(16.dp))
 
-            // 右侧：刷新按钮
-            // 使用 MainScreen 中的 NeuButton
             NeuButton(size = 60.dp, onClick = {
                 if (scanPathDisplay != "未设置") {
                     viewModel.scanMusic(context)
@@ -132,42 +132,68 @@ fun SettingsScreen(
         }
     }
 
-    // === 扫描进度弹窗 ===
+    // === 扫描日志窗口 ===
     if (showDialog) {
         AlertDialog(
             onDismissRequest = {
-                // 只有扫描结束才能关闭
                 if (!isScanning) viewModel.clearLog()
             },
             title = {
-                Text(if (isScanning) "正在扫描..." else "扫描结果", color = TextPrimary)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isScanning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.dp,
+                            color = AccentColor
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("扫描中...", color = TextPrimary, fontSize = 18.sp)
+                    } else {
+                        Text("扫描完成", color = TextPrimary, fontSize = 18.sp)
+                    }
+                }
             },
             text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    if (isScanning) {
-                        CircularProgressIndicator(color = AccentColor, modifier = Modifier.padding(bottom = 16.dp))
+                // 使用 LazyColumn 显示滚动日志
+                val listState = rememberLazyListState()
+
+                // 自动滚动到底部
+                LaunchedEffect(scanLogs.size) {
+                    if (scanLogs.isNotEmpty()) {
+                        listState.animateScrollToItem(scanLogs.lastIndex)
                     }
-                    // 实时显示的日志
-                    Text(
-                        text = scanLog,
-                        color = TextPrimary,
-                        fontSize = 14.sp,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
-                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp) // 给日志区域一个固定高度
+                        .background(Color.Gray.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    LazyColumn(state = listState) {
+                        items(scanLogs) { log ->
+                            Text(
+                                text = log,
+                                fontSize = 12.sp,
+                                color = TextPrimary,
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
                 if (!isScanning) {
                     TextButton(onClick = { viewModel.clearLog() }) {
-                        Text("确定", color = AccentColor)
+                        Text("确定", color = AccentColor, fontWeight = FontWeight.Bold)
                     }
                 }
             },
             containerColor = NeuBackground,
             titleContentColor = TextPrimary,
-            textContentColor = TextPrimary
+            textContentColor = TextPrimary,
+            shape = RoundedCornerShape(16.dp)
         )
     }
 }
