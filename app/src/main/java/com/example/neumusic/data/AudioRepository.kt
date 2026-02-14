@@ -3,18 +3,20 @@ package com.example.neumusic.data
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Environment // 导入 Environment
-import androidx.documentfile.provider.DocumentFile
+import android.os.Environment
+import android.util.Log
+import androidx.core.net.toUri
 import com.example.neumusic.data.database.MusicDatabase
 import com.example.neumusic.data.database.MusicEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URLDecoder // 导入 URLDecoder
+import java.net.URLDecoder
 import java.util.UUID
 
 // UI 层使用的模型
@@ -31,6 +33,7 @@ data class AudioFile(
 
 class AudioRepository(private val context: Context) {
     private val musicDao = MusicDatabase.getDatabase(context).musicDao()
+    private val TAG = "DUU"
 
     val allMusic: Flow<List<AudioFile>> = musicDao.getAllMusic().map { entities ->
         entities.map { entity ->
@@ -40,7 +43,8 @@ class AudioRepository(private val context: Context) {
                 artist = entity.artist,
                 duration = entity.duration,
                 uri = Uri.parse(entity.path),
-                albumArtUri = entity.albumArtPath?.let { Uri.fromFile(File(it)) },
+                // 使用 toUri() 扩展函数更安全
+                albumArtUri = entity.albumArtPath?.let { File(it).toUri() },
                 path = entity.path,
                 embeddedLyrics = entity.embeddedLyrics
             )
@@ -48,112 +52,154 @@ class AudioRepository(private val context: Context) {
     }
 
     fun scanUriAndSave(treeUriStr: String): Flow<String> = flow {
-        emit("正在初始化扫描...")
+        val startTime = System.currentTimeMillis()
+        emit("正在分析目录...")
 
         val treeUri = Uri.parse(treeUriStr)
-        val rootDoc = DocumentFile.fromTreeUri(context, treeUri)
+        val folderPath = getAbsolutePathFromSafUri(treeUri)
 
-        if (rootDoc == null || !rootDoc.exists()) {
-            emit("错误：无法访问该目录")
+        if (folderPath == null || !File(folderPath).exists()) {
+            emit("错误：目录不存在")
             return@flow
         }
 
-        val entities = mutableListOf<MusicEntity>()
+        val rootFile = File(folderPath)
         val coversDir = File(context.cacheDir, "covers")
         if (!coversDir.exists()) coversDir.mkdirs()
 
+        val existingPaths = try {
+            musicDao.getAllMusic().first().map { it.path }.toMutableSet()
+        } catch (e: Exception) {
+            mutableSetOf<String>()
+        }
+
+        Log.d(TAG, "数据库现有: ${existingPaths.size}")
+
+        val newEntities = mutableListOf<MusicEntity>()
+        var addedCount = 0
+
         val mmr = MediaMetadataRetriever()
-        var scannedCount = 0
 
-        suspend fun traverse(doc: DocumentFile) {
-            if (doc.isDirectory) {
-                doc.listFiles().forEach { traverse(it) }
-            } else if (doc.isFile) {
-                val name = doc.name ?: ""
-                if (name.endsWith(".mp3", true) ||
-                    name.endsWith(".flac", true) ||
-                    name.endsWith(".m4a", true)) {
+        rootFile.walkTopDown()
+            .filter { file ->
+                file.isFile && (
+                        file.extension.equals("mp3", true) ||
+                                file.extension.equals("flac", true) ||
+                                file.extension.equals("m4a", true) ||
+                                file.extension.equals("wav", true)
+                        )
+            }
+            .forEach { file ->
+                if (existingPaths.contains(file.absolutePath)) {
+                    return@forEach
+                }
 
-                    emit("发现: $name")
+                try {
+                    mmr.setDataSource(file.absolutePath)
+                    val title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) ?: file.nameWithoutExtension
+                    val artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: "Unknown Artist"
+                    val durationStr = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    val duration = durationStr?.toLongOrNull() ?: 0L
 
+                    var coverPath: String? = null
                     try {
-                        mmr.setDataSource(context, doc.uri)
-
-                        val title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) ?: name.substringBeforeLast(".")
-                        val artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: "Unknown Artist"
-                        val duration = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-
-                        var coverPath: String? = null
                         val embeddedPic = mmr.embeddedPicture
                         if (embeddedPic != null) {
                             val coverFile = File(coversDir, "${UUID.randomUUID()}.jpg")
                             FileOutputStream(coverFile).use { it.write(embeddedPic) }
                             coverPath = coverFile.absolutePath
                         }
+                    } catch (e: Exception) {}
 
-                        // 【关键修复】尝试获取真实路径
-                        // 如果这个 doc 是 file:// 类型的 Uri，直接 toString 可能带前缀，最好用 path
-                        // 如果是 content:// 类型的 Uri (SAF)，尝试转换
-                        val realPath = getAbsolutePathFromSafUri(doc.uri) ?: doc.uri.path ?: doc.uri.toString()
+                    // 【修复】全部使用具名参数，确保类型对应
+                    newEntities.add(MusicEntity(
+                        title = title,
+                        artist = artist,
+                        duration = duration, // 这里是 Long
+                        path = file.absolutePath, // 这里是 String
+                        albumArtPath = coverPath,
+                        embeddedLyrics = null
+                    ))
+                    addedCount++
 
-                        entities.add(MusicEntity(
-                            title = title,
-                            artist = artist,
-                            duration = duration,
-                            path = realPath, // 存入真实路径，让 LyricsHelper 能找到它！
-                            albumArtPath = coverPath,
-                            embeddedLyrics = null
-                        ))
-                        scannedCount++
+                    if (newEntities.size >= 50) {
+                        musicDao.insertAll(newEntities)
+                        newEntities.clear()
+                    }
+                } catch (e: Exception) {
+                    // 【修复】catch 块里也要用具名参数，防止把 name(String) 传给 duration(Long)
+                    newEntities.add(MusicEntity(
+                        title = file.name,
+                        artist = "Unknown",
+                        duration = 0L, // 显式传 0L
+                        path = file.absolutePath,
+                        albumArtPath = null,
+                        embeddedLyrics = null
+                    ))
+                    addedCount++
+                }
+            }
 
-                    } catch (e: Exception) {
-                        val realPath = getAbsolutePathFromSafUri(doc.uri) ?: doc.uri.toString()
-                        entities.add(MusicEntity(
-                            title = name,
-                            artist = "Unknown",
-                            duration = 0,
-                            path = realPath,
-                            albumArtPath = null,
-                            embeddedLyrics = null
-                        ))
-                        scannedCount++
+        try { mmr.release() } catch (e: Exception) {}
+
+        if (newEntities.isNotEmpty()) musicDao.insertAll(newEntities)
+
+        emit("正在清理无效条目...")
+        var deletedCount = 0
+        var cleanedCovers = 0
+
+        val allMusicList = try {
+            musicDao.getAllMusic().first()
+        } catch (e: Exception) {
+            emptyList()
+        }
+
+        val toDeleteIds = mutableListOf<Long>()
+        val activeCoverPaths = mutableSetOf<String>()
+
+        for (music in allMusicList) {
+            if (!music.albumArtPath.isNullOrEmpty()) {
+                activeCoverPaths.add(music.albumArtPath)
+            }
+
+            if (music.path.startsWith(folderPath)) {
+                if (!File(music.path).exists()) {
+                    toDeleteIds.add(music.id)
+                    // 如果要删除了，就从活跃封面列表中移除
+                    if (!music.albumArtPath.isNullOrEmpty()) {
+                        activeCoverPaths.remove(music.albumArtPath)
                     }
                 }
             }
         }
 
-        traverse(rootDoc)
-
-        try { mmr.release() } catch (e: Exception) {}
-
-        emit("正在写入数据库...")
-        if (entities.isNotEmpty()) {
-            musicDao.clearAll()
-            musicDao.insertAll(entities)
+        toDeleteIds.forEach {
+            musicDao.deleteMusicById(it)
+            deletedCount++
         }
 
-        emit("扫描完成，共找到 $scannedCount 首歌曲")
+        // 清理孤儿封面
+        if (coversDir.exists() && coversDir.isDirectory) {
+            coversDir.listFiles()?.forEach { coverFile ->
+                if (coverFile.isFile && !activeCoverPaths.contains(coverFile.absolutePath)) {
+                    if (coverFile.delete()) {
+                        cleanedCovers++
+                    }
+                }
+            }
+        }
+
+        val timeUsed = (System.currentTimeMillis() - startTime) / 1000f
+        val msg = "完成! 耗时${String.format("%.1f", timeUsed)}s | 新增: $addedCount | 移除: $deletedCount | 清理图片: $cleanedCovers"
+        Log.i(TAG, msg)
+        emit(msg)
 
     }.flowOn(Dispatchers.IO)
 
-    /**
-     * 【辅助工具】将 SAF URI 尝试解析为绝对路径
-     * 这个函数是私有的 (private)，只能在这个类里面用
-     */
     private fun getAbsolutePathFromSafUri(uri: Uri): String? {
         try {
-            // DocumentFile 的 URI 通常格式为: content://.../tree/primary%3AMusic/document/primary%3AMusic%2FSong.mp3
             val path = uri.path ?: return null
-
-            // 关键逻辑：解析 SAF 编码的路径部分
-            // 常见的 SAF URI 最后一段包含 "primary:..." 或 "1234-5678:..."
-            val id = if (path.contains("/document/")) {
-                path.substringAfter("/document/")
-            } else {
-                path
-            }
-
-            // 解码 URL 编码 (例如 %3A -> :)
+            val id = if (path.contains("/document/")) path.substringAfter("/document/") else path.substringAfter("/tree/")
             val decodedId = URLDecoder.decode(id, "UTF-8")
 
             if (decodedId.contains(":")) {
@@ -164,8 +210,6 @@ class AudioRepository(private val context: Context) {
                 if ("primary".equals(type, ignoreCase = true)) {
                     return Environment.getExternalStorageDirectory().absolutePath + "/" + realPath
                 } else {
-                    // 外置 SD 卡路径，通常是 /storage/UUID/...
-                    // 这里做一个简单的假设，具体路径可能因厂商而异
                     return "/storage/$type/$realPath"
                 }
             }
@@ -174,5 +218,4 @@ class AudioRepository(private val context: Context) {
         }
         return null
     }
-
-} // <--- 类结束
+}
