@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="100dp"
+    android:background="@drawable/notification_bg_rounded"
+    android:orientation="horizontal">
+
+    <!-- 1. 左侧大封面 -->
+    <ImageView
+        android:id="@+id/notification_cover"
+        android:layout_width="100dp"
+        android:layout_height="100dp"
+        android:scaleType="centerCrop"
+        android:radius="8dp"
+        android:src="@mipmap/ic_launcher" />
+
+    <!-- 右侧容器 -->
+    <RelativeLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:paddingStart="16dp">
+
+        <!-- 2. 右上角关闭按钮 -->
+        <ImageButton
+            android:id="@+id/notification_btn_close"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_alignParentEnd="true"
+            android:layout_alignParentTop="true"
+            android:layout_marginEnd="8dp"
+            android:layout_marginTop="8dp"
+            android:background="?android:selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_music_close"
+            android:tint="#CCCCCC" />
+
+        <!-- 3. 歌曲信息 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_toStartOf="@id/notification_btn_close"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/notification_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="Song Title"
+                android:textColor="@color/netease_title"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/notification_artist"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="Artist Name"
+                android:textColor="@color/netease_artist"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- 4. 底部控制栏 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentBottom="true"
+            android:layout_marginBottom="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <!-- 上一首 -->
+            <ImageButton
+                android:id="@+id/notification_btn_prev"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:background="?android:selectableItemBackgroundBorderless"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_music_prev"
+                android:tint="#333333" />
+
+            <!-- 播放/暂停 -->
+            <ImageButton
+                android:id="@+id/notification_btn_play"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="?android:selectableItemBackgroundBorderless"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_music_play"
+                android:tint="@color/netease_red" />
+
+            <!-- 下一首 -->
+            <ImageButton
+                android:id="@+id/notification_btn_next"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:background="?android:selectableItemBackgroundBorderless"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_music_next"
+                android:tint="#333333" />
+
+            <!-- 占位符 (修改为 TextView) -->
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="0.5"
+                android:visibility="invisible" />
+        </LinearLayout>
+
+    </RelativeLayout>
+</LinearLayout>

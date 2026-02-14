@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 1. 背景色 -->
+    <item android:drawable="@color/splash_color" />
+
+    <!-- 2. 中间的 Logo -->
+    <!-- 【关键修复】：去掉 <bitmap> 标签，直接在 item 里写 drawable -->
+    <!-- 使用 gravity="center" 让它居中且不拉伸 -->
+    <item
+        android:drawable="@mipmap/ic_launcher"
+        android:gravity="center" />
+</layer-list>

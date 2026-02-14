@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主题 1: APP 主题 (MainScreen) -->
+    <!-- 使用系统原生 Material 主题，不需要任何外部库 -->
+    <style name="Theme.Neumusic" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!-- 主题 2: Splash 主题 (启动页) -->
+    <!-- 同样使用系统原生主题，避免报错 -->
+    <style name="Theme.Splash" parent="android:Theme.Material.Light.NoActionBar">
+    </style>
+</resources>
+
